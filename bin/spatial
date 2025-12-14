@@ -1,0 +1,35 @@
+#!/usr/bin/env php
+<?php
+/**
+ * Spatial CLI - Development tools for Spatial Framework
+ * 
+ * Usage: php spatial <command> [arguments]
+ */
+
+declare(strict_types=1);
+
+// Find autoloader
+$autoloadPaths = [
+    __DIR__ . '/../vendor/autoload.php',       // When installed as dependency
+    __DIR__ . '/../../../autoload.php',        // When in vendor/spatial/cli
+    __DIR__ . '/../../../../vendor/autoload.php', // Project root
+];
+
+$autoloaded = false;
+foreach ($autoloadPaths as $path) {
+    if (file_exists($path)) {
+        require_once $path;
+        $autoloaded = true;
+        break;
+    }
+}
+
+if (!$autoloaded) {
+    echo "Error: Could not find autoloader. Run 'composer install' first.\n";
+    exit(1);
+}
+
+use Spatial\Cli\CliApplication;
+
+$app = new CliApplication();
+exit($app->run($argv));
