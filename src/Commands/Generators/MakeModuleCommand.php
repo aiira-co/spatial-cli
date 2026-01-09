@@ -144,7 +144,7 @@ PHP;
         $useStatement = "use Presentation\\{$name}\\{$moduleClassName};";
         if (!str_contains($content, $useStatement)) {
             // Find the last use statement and add after it
-            if (preg_match('/^(use [^;]+;\s*)+/m', $content, $matches, PREG_OFFSET_SET)) {
+            if (preg_match('/^(use [^;]+;\s*)+/m', $content, $matches, PREG_OFFSET_CAPTURE)) {
                 $insertPos = $matches[0][1] + strlen($matches[0][0]);
                 $content = substr($content, 0, $insertPos) . $useStatement . "\n" . substr($content, $insertPos);
             }
@@ -161,4 +161,5 @@ PHP;
         return file_put_contents($appModulePath, $content) !== false;
     }
 }
+
 
