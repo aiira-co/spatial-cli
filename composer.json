@@ -1,7 +1,7 @@
 {
     "name": "spatial/cli",
     "description": "CLI tools for Spatial Framework - code generators, migrations, and development utilities",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "type": "library",
     "license": "MIT",
     "authors": [
@@ -12,7 +12,8 @@
     ],
     "require": {
         "php": "^8.2",
-        "spatial/core": "^4.0"
+        "spatial/core": "^4.0",
+        "symfony/yaml": "^6.0|^7.0"
     },
     "require-dev": {
         "squizlabs/php_codesniffer": "^3.7",

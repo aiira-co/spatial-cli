@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Spatial\Cli\Commands\Generators;
 
-use Spatial\Console\AbstractCommand;
 use Spatial\Console\Application;
 
 /**
@@ -17,11 +16,16 @@ use Spatial\Console\Application;
  * 
  * @package Spatial\Console\Commands
  */
-class MakeControllerCommand extends AbstractCommand
+class MakeControllerCommand extends AbstractGenerator
 {
-    public function getName(): string
+    protected function getCommandName(): string
     {
         return 'make:controller';
+    }
+
+    public function getName(): string
+    {
+        return $this->getCommandName();
     }
 
     public function getDescription(): string
@@ -32,11 +36,12 @@ class MakeControllerCommand extends AbstractCommand
     public function execute(array $args, Application $app): int
     {
         $this->app = $app;
+        $this->dryRun = $this->isDryRun($args);
 
         if (empty($args['_positional'])) {
             $this->error("Please provide a controller name.");
-            $this->output("Usage: php spatial make:controller <name> --module=<ModuleName>");
-            $this->output("Example: php spatial make:controller User --module=IdentityApi");
+            $this->output("Usage: php spatial make:controller <name> --module=<ModuleName> [--logging] [--tracing] [--auth]");
+            $this->output("Example: php spatial make:controller User --module=IdentityApi --logging --auth");
             return 1;
         }
 
@@ -49,15 +54,23 @@ class MakeControllerCommand extends AbstractCommand
         $module = $args['module'] ?? null;
         if ($module === null) {
             $this->error("--module parameter is required.");
-            $this->output("Usage: php spatial make:controller <name> --module=<ModuleName>");
+            $this->output("Usage: php spatial make:controller <name> --module=<ModuleName> [--logging] [--tracing] [--auth]");
             $this->output("Example: php spatial make:controller Product --module=WebApi");
             return 1;
         }
 
         $module = $this->toPascalCase($module);
 
+        // Load config defaults
+        $configDefaults = ConfigLoader::getGeneratorDefaults($this->getBasePath(), 'make:controller');
+
+        // Parse optional flags (CLI args override config)
+        $logging = isset($args['logging']) ? true : ($configDefaults['logging'] ?? false);
+        $tracing = isset($args['tracing']) ? true : ($configDefaults['tracing'] ?? false);
+        $auth = isset($args['auth']) ? true : ($configDefaults['auth'] ?? false);
+
         // Generate controller
-        $content = $this->generateController($name, $module);
+        $content = $this->generateController($name, $module, $logging, $tracing, $auth);
         
         $controllerDir = $this->getBasePath() . "/src/presentation/{$module}/Controllers";
         $controllerPath = "{$controllerDir}/{$name}.php";
@@ -88,11 +101,68 @@ class MakeControllerCommand extends AbstractCommand
         return 0;
     }
 
-    private function generateController(string $name, string $module): string
-    {
+    private function generateController(
+        string $name, 
+        string $module,
+        bool $logging = false,
+        bool $tracing = false,
+        bool $auth = false
+    ): string {
         $shortName = str_replace('Controller', '', $name);
         $routeName = strtolower($shortName);
         $areaName = strtolower(preg_replace('/([a-z])([A-Z])/', '$1-$2', str_replace('Api', '-api', $module)));
+
+        // Build imports
+        $imports = [
+            "Common\\Libraries\\Controller",
+            "Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Commands\\Create{$shortName}",
+            "Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Commands\\Update{$shortName}",
+            "Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Commands\\Delete{$shortName}",
+            "Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Queries\\Get{$shortName}",
+            "Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Queries\\Get{$shortName}s",
+            "Psr\\Http\\Message\\ResponseInterface",
+            "Spatial\\Common\\BindSourceAttributes\\FromBody",
+            "Spatial\\Common\\HttpAttributes\\HttpDelete",
+            "Spatial\\Common\\HttpAttributes\\HttpGet",
+            "Spatial\\Common\\HttpAttributes\\HttpPost",
+            "Spatial\\Common\\HttpAttributes\\HttpPut",
+            "Spatial\\Core\\Attributes\\ApiController",
+            "Spatial\\Core\\Attributes\\Area",
+            "Spatial\\Core\\Attributes\\Route",
+        ];
+
+        if ($auth) {
+            $imports[] = "Spatial\\Core\\Attributes\\Authorize";
+            $imports[] = "Infrastructure\\Services\\AuthenticationService";
+        }
+
+        if ($logging) {
+            $imports[] = "Psr\\Log\\LoggerInterface";
+        }
+
+        if ($tracing) {
+            $imports[] = "OpenTelemetry\\API\\Trace\\TracerInterface";
+        }
+
+        $importsString = implode("\nuse ", $imports);
+
+        // Constructor
+        $constructorParams = [];
+        if ($logging) {
+            $constructorParams[] = 'protected ?LoggerInterface $logger = null';
+        }
+        if ($tracing) {
+            $constructorParams[] = 'protected ?TracerInterface $tracer = null';
+        }
+
+        $constructor = '';
+        if (!empty($constructorParams)) {
+            $params = implode(",\n        ", $constructorParams);
+            $constructor = "\n\n    public function __construct(\n        {$params}\n    ) {\n        parent::__construct();\n    }";
+        }
+
+        // Authorization attributes
+        $authAttr = $auth ? "\n    #[Authorize(AuthenticationService::class)]" : '';
 
         return <<<PHP
 <?php
@@ -101,23 +171,7 @@ declare(strict_types=1);
 
 namespace Presentation\\{$module}\\Controllers;
 
-use Common\\Libraries\\Controller;
-use Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Commands\\Create{$shortName};
-use Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Commands\\Update{$shortName};
-use Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Commands\\Delete{$shortName};
-use Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Queries\\Get{$shortName};
-use Core\\Application\\Logics\\{$shortName}\\{$shortName}\\Queries\\Get{$shortName}s;
-use Psr\\Http\\Message\\ResponseInterface;
-use Spatial\\Common\\BindSourceAttributes\\FromBody;
-use Spatial\\Common\\HttpAttributes\\HttpDelete;
-use Spatial\\Common\\HttpAttributes\\HttpGet;
-use Spatial\\Common\\HttpAttributes\\HttpPost;
-use Spatial\\Common\\HttpAttributes\\HttpPut;
-use Spatial\\Core\\Attributes\\ApiController;
-use Spatial\\Core\\Attributes\\Area;
-use Spatial\\Core\\Attributes\\Authorize;
-use Spatial\\Core\\Attributes\\Route;
-use Infrastructure\\Services\\AuthenticationService;
+use {$importsString};
 
 /**
  * {$name}
@@ -130,7 +184,7 @@ use Infrastructure\\Services\\AuthenticationService;
 #[Area('{$areaName}')]
 #[Route('[area]/[controller]')]
 class {$name} extends Controller
-{
+{{$constructor}
     /**
      * GET /{$areaName}/{$routeName}
      */
@@ -159,9 +213,8 @@ class {$name} extends Controller
 
     /**
      * POST /{$areaName}/{$routeName}
-     */
+     */{$authAttr}
     #[HttpPost]
-    #[Authorize(AuthenticationService::class)]
     public function create{$shortName}(#[FromBody] string \$content): ResponseInterface
     {
         \$command = new Create{$shortName}();
@@ -173,9 +226,8 @@ class {$name} extends Controller
 
     /**
      * PUT /{$areaName}/{$routeName}/{id}
-     */
+     */{$authAttr}
     #[HttpPut('{?id:int}')]
-    #[Authorize(AuthenticationService::class)]
     public function update{$shortName}(#[FromBody] string \$content, int \$id): ResponseInterface
     {
         \$command = new Update{$shortName}();
@@ -188,9 +240,8 @@ class {$name} extends Controller
 
     /**
      * DELETE /{$areaName}/{$routeName}/{id}
-     */
+     */{$authAttr}
     #[HttpDelete('{id:int}')]
-    #[Authorize(AuthenticationService::class)]
     public function delete{$shortName}(int \$id): ResponseInterface
     {
         \$command = new Delete{$shortName}();

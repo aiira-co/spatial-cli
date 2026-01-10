@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Spatial\Cli\Commands\Generators;
 
-use Spatial\Console\AbstractCommand;
 use Spatial\Console\Application;
 
 /**
@@ -17,11 +16,16 @@ use Spatial\Console\Application;
  * 
  * @package Spatial\Console\Commands
  */
-class MakeListenerCommand extends AbstractCommand
+class MakeListenerCommand extends AbstractGenerator
 {
-    public function getName(): string
+    protected function getCommandName(): string
     {
         return 'make:listener';
+    }
+
+    public function getName(): string
+    {
+        return $this->getCommandName();
     }
 
     public function getDescription(): string
@@ -32,11 +36,12 @@ class MakeListenerCommand extends AbstractCommand
     public function execute(array $args, Application $app): int
     {
         $this->app = $app;
+        $this->dryRun = $this->isDryRun($args);
 
         if (empty($args['_positional'])) {
             $this->error("Please provide a listener name.");
-            $this->output("Usage: php spatial make:listener <name> --event=<EventClass>");
-            $this->output("Example: php spatial make:listener SendConfirmationEmail --event=OrderCreatedEvent");
+            $this->output("Usage: php spatial make:listener <name> --event=<EventClass> [--logging] [--tracing]");
+            $this->output("Example: php spatial make:listener SendConfirmationEmail --event=OrderCreatedEvent --logging");
             return 1;
         }
 
@@ -53,7 +58,10 @@ class MakeListenerCommand extends AbstractCommand
 
         $event = $this->toPascalCase($event);
 
-        $content = $this->generateListener($name, $event);
+        // Parse flags with config fallback
+        $flags = $this->parseFlags($args, ['logging', 'tracing']);
+
+        $content = $this->generateListener($name, $event, $flags['logging'], $flags['tracing']);
         
         $path = $this->getBasePath() . "/src/core/Application/Listeners/{$name}.php";
         
@@ -75,9 +83,92 @@ class MakeListenerCommand extends AbstractCommand
         return 1;
     }
 
-    private function generateListener(string $name, string $event): string
-    {
+    private function generateListener(
+        string $name, 
+        string $event,
+        bool $logging = false,
+        bool $tracing = false
+    ): string {
         $shortName = str_replace('Listener', '', $name);
+
+        $imports = [
+            'Spatial\\Events\\Attributes\\Listener',
+        ];
+
+        if ($tracing) {
+            $imports[] = 'OpenTelemetry\\API\\Trace\\TracerInterface';
+        }
+
+        if ($logging) {
+            $imports[] = 'Psr\\Log\\LoggerInterface';
+        }
+
+        sort($imports);
+        $importsString = implode("\nuse ", $imports);
+
+        $constructorParams = [];
+        if ($logging) {
+            $constructorParams[] = 'protected LoggerInterface $logger';
+        }
+        if ($tracing) {
+            $constructorParams[] = 'protected TracerInterface $tracer';
+        }
+
+        $constructor = '';
+        if (!empty($constructorParams)) {
+            $params = implode(",\n        ", $constructorParams);
+            $constructor = <<<PHP
+    public function __construct(
+        {$params}
+    ) {}
+PHP;
+        }
+
+        $tracingStart = '';
+        $tracingEnd = '';
+        $tracingError = '';
+
+        if ($tracing) {
+            $tracingStart = <<<PHP
+        \$span = \$this->tracer->spanBuilder('{$name}::handle')->startSpan();
+        \$scope = \$span->activate();
+PHP;
+            $tracingEnd = <<<PHP
+            \$scope->detach();
+            \$span->end();
+PHP;
+            $tracingError = "\$span->recordException(\$e);";
+        }
+
+        $loggingStart = $logging ? "\$this->logger->info('{$shortName} started', [\n                'event' => \$event::eventName(),\n                'correlationId' => \$event->correlationId\n            ]);" : '';
+        $loggingEnd = $logging ? "\$this->logger->info('{$shortName} completed');" : '';
+        $loggingError = $logging ? "\$this->logger->error('{$shortName} failed', [\n                'exception' => \$e->getMessage()\n            ]);" : '';
+
+        $tryCatch = '';
+        if ($logging || $tracing) {
+            $tryCatch = <<<PHP
+        try {
+            {$loggingStart}
+
+            // TODO: Implement listener logic
+            // Example: Send email, notify external service, update cache, etc.
+
+            {$loggingEnd}
+
+        } catch (\\Exception \$e) {
+            {$loggingError}
+            {$tracingError}
+            throw \$e;
+        } finally {
+            {$tracingEnd}
+        }
+PHP;
+        } else {
+             $tryCatch = <<<PHP
+        // TODO: Implement listener logic
+        // Example: Send email, notify external service, update cache, etc.
+PHP;
+        }
 
         return <<<PHP
 <?php
@@ -86,9 +177,7 @@ declare(strict_types=1);
 
 namespace Core\\Application\\Listeners;
 
-use OpenTelemetry\\API\\Trace\\TracerInterface;
-use Psr\\Log\\LoggerInterface;
-use Spatial\\Events\\Attributes\\Listener;
+use {$importsString};
 
 /**
  * {$name}
@@ -100,10 +189,7 @@ use Spatial\\Events\\Attributes\\Listener;
 #[Listener({$event}::class)]
 class {$name}
 {
-    public function __construct(
-        protected LoggerInterface \$logger,
-        protected TracerInterface \$tracer
-    ) {}
+{$constructor}
 
     /**
      * Handle the event.
@@ -113,30 +199,8 @@ class {$name}
      */
     public function handle({$event} \$event): void
     {
-        \$span = \$this->tracer->spanBuilder('{$name}::handle')->startSpan();
-        \$scope = \$span->activate();
-
-        try {
-            \$this->logger->info('{$shortName} started', [
-                'event' => \$event::eventName(),
-                'correlationId' => \$event->correlationId
-            ]);
-
-            // TODO: Implement listener logic
-            // Example: Send email, notify external service, update cache, etc.
-
-            \$this->logger->info('{$shortName} completed');
-
-        } catch (\\Exception \$e) {
-            \$this->logger->error('{$shortName} failed', [
-                'exception' => \$e->getMessage()
-            ]);
-            \$span->recordException(\$e);
-            throw \$e;
-        } finally {
-            \$scope->detach();
-            \$span->end();
-        }
+{$tracingStart}
+{$tryCatch}
     }
 }
 PHP;

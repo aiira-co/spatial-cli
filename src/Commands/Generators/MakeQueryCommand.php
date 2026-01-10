@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Spatial\Cli\Commands\Generators;
 
-use Spatial\Console\AbstractCommand;
 use Spatial\Console\Application;
 
 /**
@@ -18,11 +17,16 @@ use Spatial\Console\Application;
  * 
  * @package Spatial\Console\Commands
  */
-class MakeQueryCommand extends AbstractCommand
+class MakeQueryCommand extends AbstractGenerator
 {
-    public function getName(): string
+    protected function getCommandName(): string
     {
         return 'make:query';
+    }
+
+    public function getName(): string
+    {
+        return $this->getCommandName();
     }
 
     public function getDescription(): string
@@ -33,52 +37,55 @@ class MakeQueryCommand extends AbstractCommand
     public function execute(array $args, Application $app): int
     {
         $this->app = $app;
+        $this->dryRun = $this->isDryRun($args);
 
         if (empty($args['_positional'])) {
             $this->error("Please provide a query name.");
-            $this->output("Usage: php spatial make:query <name> --module=<Module> --entity=<Entity>");
-            $this->output("Example: php spatial make:query GetUsers --module=Identity --entity=User");
+            $this->output("Usage: php spatial make:query <name> --module=<Module> --entity=<Entity> [--logging] [--tracing] [--releaseEntity] [--dry-run]");
+            $this->output("Example: php spatial make:query GetUsers --module=Identity --entity=User --logging --tracing");
             return 1;
         }
 
         $name = $this->toPascalCase($args['_positional'][0]);
 
-        // Module and entity are required
-        $module = $args['module'] ?? null;
-        $entity = $args['entity'] ?? null;
-
-        if ($module === null || $entity === null) {
-            $this->error("Both --module and --entity parameters are required.");
-            $this->output("Usage: php spatial make:query <name> --module=<Module> --entity=<Entity>");
-            $this->output("Example: php spatial make:query GetProducts --module=App --entity=Product");
+        // Parse module and entity
+        $parsed = $this->parseModuleEntity($args);
+        if ($parsed === null) {
             return 1;
         }
+        ['module' => $module, 'entity' => $entity] = $parsed;
 
-        $module = $this->toPascalCase($module);
-        $entity = $this->toPascalCase($entity);
+        // Parse flags with config fallback
+        $flags = $this->parseFlags($args, ['logging', 'tracing', 'releaseEntity']);
 
         $queryContent = $this->generateQuery($name, $module, $entity);
-        $handlerContent = $this->generateHandler($name, $module, $entity);
+        $handlerContent = $this->generateHandler(
+            $name, 
+            $module, 
+            $entity, 
+            $flags['logging'], 
+            $flags['tracing'], 
+            $flags['releaseEntity']
+        );
         
         $basePath = $this->getBasePath() . "/src/core/Application/Logics/{$module}/{$entity}/Queries";
         
         $queryPath = "{$basePath}/{$name}.php";
         $handlerPath = "{$basePath}/{$name}Handler.php";
 
-        if (file_exists($queryPath)) {
-            $this->error("Query already exists: {$queryPath}");
-            return 1;
-        }
-
-        $this->ensureDirectory($basePath);
-
-        $this->writeFile($queryPath, $queryContent);
-        $this->success("Created query: {$queryPath}");
-        
-        $this->writeFile($handlerPath, $handlerContent);
-        $this->success("Created handler: {$handlerPath}");
-
-        return 0;
+        // Create query and handler files
+        return $this->createFiles([
+            [
+                'path' => $queryPath,
+                'content' => $queryContent,
+                'type' => 'query'
+            ],
+            [
+                'path' => $handlerPath,
+                'content' => $handlerContent,
+                'type' => 'handler'
+            ]
+        ]);
     }
 
     private function generateQuery(string $name, string $module, string $entity): string
@@ -138,8 +145,99 @@ class {$name} extends Request
 PHP;
     }
 
-    private function generateHandler(string $name, string $module, string $entity): string
-    {
+    private function generateHandler(
+        string $name, 
+        string $module, 
+        string $entity,
+        bool $logging = false,
+        bool $tracing = false,
+        bool $releaseEntity = false
+    ): string {
+        $imports = [
+            'Common\\Response\\ServerResponse',
+            'Exception',
+            'GuzzleHttp\\Psr7\\Response',
+            'JsonException',
+            'Psr\\Http\\Message\\ResponseInterface',
+            'Psr\\Http\\Message\\ServerRequestInterface',
+            'Spatial\\Psr7\\RequestHandler',
+        ];
+
+        if ($tracing) {
+            $imports[] = 'OpenTelemetry\\API\\Trace\\StatusCode';
+            $imports[] = 'OpenTelemetry\\API\\Trace\\TracerInterface';
+        }
+
+        if ($logging) {
+            $imports[] = 'Psr\\Log\\LoggerInterface';
+        }
+
+        sort($imports);
+        $importsString = implode("\nuse ", $imports);
+
+        $constructorParams = [];
+        if ($logging) {
+            $constructorParams[] = 'protected LoggerInterface $logger';
+        }
+        if ($tracing) {
+            $constructorParams[] = 'protected TracerInterface $tracer';
+        }
+        
+        $constructor = '';
+        if (!empty($constructorParams)) {
+            $params = implode(",\n        ", $constructorParams);
+            $constructor = <<<PHP
+    public function __construct(
+        {$params}
+    ) {
+        parent::__construct();
+    }
+PHP;
+        } else {
+            $constructor = <<<PHP
+    public function __construct() {
+        parent::__construct();
+    }
+PHP;
+        }
+
+        $tracingStart = '';
+        $tracingEnd = '';
+        $tracingErrorJson = '';
+        $tracingErrorEx = '';
+        
+        if ($tracing) {
+            $tracingStart = <<<PHP
+        // Start tracing span
+        \$span = \$this->tracer->spanBuilder('{$name}Handler::handle')->startSpan();
+        \$scope = \$span->activate();
+PHP;
+            $tracingEnd = <<<PHP
+            \$span->setStatus(StatusCode::STATUS_OK);
+PHP;
+            $tracingErrorJson = "\$span->recordException(\$e)->setStatus(StatusCode::STATUS_ERROR, 'JsonException');";
+            $tracingErrorEx = "\$span->recordException(\$e)->setStatus(StatusCode::STATUS_ERROR, 'Exception');";
+        }
+
+        $loggingStart = $logging ? "\$this->logger->info('Starting {$name} query.');" : '';
+        $loggingEnd = $logging ? "\$this->logger->info('{$name} completed successfully.');" : '';
+        $loggingErrorJson = $logging ? "\$this->logger->error('JSON Exception in {$name}', ['exception' => \$e]);" : '';
+        $loggingErrorEx = $logging ? "\$this->logger->error('Exception in {$name}', ['exception' => \$e]);" : '';
+
+        $releaseCode = '';
+        $finallyBlock = '';
+        
+        if ($releaseEntity || $tracing) {
+            $finallyBlock = "finally {\n";
+            if ($releaseEntity) {
+                $finallyBlock .= "            // Release resources\n            \$request->releaseEntityManager();\n";
+            }
+            if ($tracing) {
+                $finallyBlock .= "            \$scope->detach();\n            \$span->end();\n";
+            }
+            $finallyBlock .= "        }";
+        }
+
         return <<<PHP
 <?php
 
@@ -147,30 +245,16 @@ declare(strict_types=1);
 
 namespace Core\\Application\\Logics\\{$module}\\{$entity}\\Queries;
 
-use Common\\Response\\ServerResponse;
-use Exception;
-use GuzzleHttp\\Psr7\\Response;
-use JsonException;
-use OpenTelemetry\\API\\Trace\\StatusCode;
-use OpenTelemetry\\API\\Trace\\TracerInterface;
-use Psr\\Http\\Message\\ResponseInterface;
-use Psr\\Http\\Message\\ServerRequestInterface;
-use Psr\\Log\\LoggerInterface;
-use Spatial\\Psr7\\RequestHandler;
+use {$importsString};
 
 /**
  * {$name} Handler
  * 
- * Handles the {$name} query with OpenTelemetry tracing and logging.
+ * Handles the {$name} query.
  */
 class {$name}Handler extends RequestHandler
 {
-    public function __construct(
-        protected LoggerInterface \$logger,
-        protected TracerInterface \$tracer
-    ) {
-        parent::__construct();
-    }
+{$constructor}
 
     /**
      * Handle the query request.
@@ -180,11 +264,8 @@ class {$name}Handler extends RequestHandler
      */
     public function handle({$name}|ServerRequestInterface \$request): ResponseInterface
     {
-        // Start tracing span
-        \$span = \$this->tracer->spanBuilder('{$name}Handler::handle')->startSpan();
-        \$scope = \$span->activate();
-
-        \$this->logger->info('Starting {$name} query.');
+{$tracingStart}
+{$loggingStart}
 
         \$res = new ServerResponse();
 
@@ -205,29 +286,24 @@ class {$name}Handler extends RequestHandler
                 );
             }
 
-            \$this->logger->info('{$name} completed successfully.');
-            \$span->setStatus(StatusCode::STATUS_OK);
+{$loggingEnd}
+{$tracingEnd}
 
         } catch (JsonException \$e) {
-            \$this->logger->error('JSON Exception in {$name}', ['exception' => \$e]);
-            \$span->recordException(\$e)->setStatus(StatusCode::STATUS_ERROR, 'JsonException');
+            {$loggingErrorJson}
+            {$tracingErrorJson}
             \$res->logError(
                 code: '500',
                 detail: ['reason' => 'JSON encoding error', 'exception' => \$e->getMessage()]
             );
         } catch (Exception \$e) {
-            \$this->logger->error('Exception in {$name}', ['exception' => \$e]);
-            \$span->recordException(\$e)->setStatus(StatusCode::STATUS_ERROR, 'Exception');
+            {$loggingErrorEx}
+            {$tracingErrorEx}
             \$res->logError(
                 code: '500',
                 detail: ['reason' => \$e->getMessage()]
             );
-        } finally {
-            // Release resources
-            \$request->releaseEntityManager();
-            \$scope->detach();
-            \$span->end();
-        }
+        } {$finallyBlock}
 
         \$response = new Response();
         \$response = \$response->withStatus(\$res->getResponseStatus());

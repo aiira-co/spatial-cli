@@ -1,0 +1,48 @@
+# .spatial.yml - Spatial Framework CLI Configuration
+# This file defines default values for generator commands
+
+generators:
+  # Global defaults applied to all generators (unless overridden)
+  defaults:
+    logging: true          # Include PSR-3 logger by default
+    tracing: false         # Exclude OpenTelemetry tracing by default
+    releaseEntity: true    # Always release entity managers
+
+  # Generator-specific overrides 
+  # These take precedence over global defaults
+  overrides:
+    make:query:
+      logging: true
+      tracing: true        # Always trace queries (slow query monitoring)
+      releaseEntity: true
+
+    make:command:
+      logging: true
+      tracing: true        # Always trace commands (critical operations)
+      releaseEntity: true
+
+    make:listener:
+      logging: true
+      tracing: false       # Listeners don't need tracing
+
+    make:controller:
+      logging: true
+      tracing: false
+      auth: true           # Protected by default
+
+    make:middleware:
+      logging: true
+      tracing: true        # Always trace middleware (performance)
+
+    make:job:
+      logging: true
+      tracing: true
+      retry: 5             # Custom default retry count
+
+
+project:
+  # Optional: Customize paths (if different from defaults)
+  namespace: "MyApp"
+  presentation_path: "src/presentation"
+  core_path: "src/core"
+  infrastructure_path: "src/infrastructure"
